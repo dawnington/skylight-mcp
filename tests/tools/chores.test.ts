@@ -30,9 +30,18 @@ describe('chore tools', () => {
     request.mockResolvedValue({ data: [{ id: '1', type: 'chore', attributes: { name: 'Dishes' } }] });
     const out = await tools.skylight_list_chores({ after: '2026-05-01', before: '2026-06-01' });
     expect(request).toHaveBeenCalledWith('GET', '/frames/3435252/chores', {
-      query: { after: '2026-05-01', before: '2026-06-01' },
+      query: { after: '2026-05-01', before: '2026-06-01', include_up_for_grabs: 'true' },
     });
     expect(JSON.parse(out.content[0].text)).toEqual([{ id: '1', type: 'chore', name: 'Dishes' }]);
+  });
+
+  it('list_chores passes include_up_for_grabs: false and include_late through', async () => {
+    const { tools, request } = harness();
+    request.mockResolvedValue({ data: [] });
+    await tools.skylight_list_chores({ after: '2026-05-01', before: '2026-06-01', include_up_for_grabs: false, include_late: true });
+    expect(request).toHaveBeenCalledWith('GET', '/frames/3435252/chores', {
+      query: { after: '2026-05-01', before: '2026-06-01', include_up_for_grabs: 'false', include_late: 'true' },
+    });
   });
 
   it('list_chores with explicit frameId uses it and skips resolveFrameId', async () => {
@@ -40,7 +49,7 @@ describe('chore tools', () => {
     request.mockResolvedValue({ data: [] });
     await tools.skylight_list_chores({ after: '2026-05-01', before: '2026-06-01', frameId: '99' });
     expect(request).toHaveBeenCalledWith('GET', '/frames/99/chores', {
-      query: { after: '2026-05-01', before: '2026-06-01' },
+      query: { after: '2026-05-01', before: '2026-06-01', include_up_for_grabs: 'true' },
     });
     expect(resolveFrameId).not.toHaveBeenCalled();
   });
@@ -220,6 +229,129 @@ describe('chore tools', () => {
     request.mockResolvedValue(undefined);
     const out = await tools.skylight_list_chores({ after: '2026-05-01', before: '2026-06-01' });
     expect(JSON.parse(out.content[0].text)).toEqual([]);
+  });
+
+
+  // ── skylight_chore_star_summary ──────────────────────────────────────────
+
+  const CATS = { data: [
+    { id: '1', type: 'category', attributes: { label: 'Dawn' } },
+    { id: '2', type: 'category', attributes: { label: 'Jake' } },
+    { id: '3', type: 'category', attributes: {} },
+    { id: '4', type: 'category' },
+  ] };
+  const rel = (id: string) => ({ data: { id, type: 'category' } });
+  const chore = (id: string, attributes: Record<string, unknown>, relationships: Record<string, unknown> = {}) =>
+    ({ id, type: 'chore', attributes, relationships });
+
+  function summary(pages: unknown[], cats: unknown = CATS) {
+    const h = harness();
+    h.request.mockImplementation(async (_m: string, path: string) => (path.endsWith('/categories') ? cats : pages.shift()));
+    return h;
+  }
+
+  it('chore_star_summary reads week-long windows with up-for-grabs and late chores', async () => {
+    const { tools, request } = summary([{ data: [] }, { data: [] }]);
+    await tools.skylight_chore_star_summary({ after: '2026-11-01', before: '2026-11-10' });
+    expect(request).toHaveBeenCalledWith('GET', '/frames/3435252/categories');
+    expect(request).toHaveBeenCalledWith('GET', '/frames/3435252/chores', {
+      query: { after: '2026-11-01', before: '2026-11-07', include_late: 'true', include_up_for_grabs: 'true' },
+    });
+    expect(request).toHaveBeenCalledWith('GET', '/frames/3435252/chores', {
+      query: { after: '2026-11-08', before: '2026-11-10', include_late: 'true', include_up_for_grabs: 'true' },
+    });
+    expect(request).toHaveBeenCalledTimes(3);
+  });
+
+  it('chore_star_summary aggregates completions by date + person + chore and credits up-for-grabs to the completer', async () => {
+    const { tools } = summary([{ data: [
+      chore('10', { summary: 'Dishes', status: 'complete', completed_on: '2026-11-02', reward_points: 2, start: '2026-11-02' }, { category: rel('1') }),
+      chore('10', { summary: 'Dishes', status: 'complete', completed_on: '2026-11-02', reward_points: 2, start: '2026-11-02', completed_at: 'b' }, { category: rel('1') }),
+      chore('10', { summary: 'Dishes', status: 'complete', completed_on: '2026-11-02', reward_points: 2, start: '2026-11-02', completed_at: 'b' }, { category: rel('1') }),
+      chore('11', { summary: 'Trash', status: 'complete', completed_on: '2026-11-03', reward_points: 3, up_for_grabs: true }, { completed_category: rel('2') }),
+      chore('12', { summary: 'Walk', status: 'complete', completed_on: '2026-11-03' }, { category: rel('2') }),
+      chore('13', { summary: 'Mystery', status: 'complete', completed_on: '2026-11-04', reward_points: 1 }, { category: rel('9') }),
+      chore('14', { summary: 'Nobody', status: 'complete', completed_on: '2026-11-04', reward_points: 1 }),
+      chore('15', { summary: 'Unlabelled', status: 'complete', completed_on: '2026-11-04', reward_points: 1 }, { category: rel('3') }),
+      chore('16', { summary: 'Too early', status: 'complete', completed_on: '2026-10-31', reward_points: 5 }, { category: rel('1') }),
+      chore('17', { summary: 'Too late', status: 'complete', completed_on: '2026-11-08', reward_points: 5 }, { category: rel('1') }),
+      chore('18', { summary: 'No date', status: 'complete', reward_points: 5 }, { category: rel('1') }),
+      chore('19', { summary: 'Skipped', status: 'skipped', reward_points: 5 }, { category: rel('1') }),
+    ] }]);
+    const out = JSON.parse((await tools.skylight_chore_star_summary({ after: '2026-11-01', before: '2026-11-07' })).content[0].text);
+    expect(out.untrusted_content).toBe(true);
+    expect(out.range).toEqual({ after: '2026-11-01', before: '2026-11-07' });
+    expect(out.completed).toEqual([
+      { date: '2026-11-02', person: 'Dawn', chore: 'Dishes', up_for_grabs: false, times: 2, stars: 4 },
+      { date: '2026-11-03', person: 'Jake', chore: 'Trash', up_for_grabs: true, times: 1, stars: 3 },
+      { date: '2026-11-03', person: 'Jake', chore: 'Walk', up_for_grabs: false, times: 1, stars: 0 },
+      { date: '2026-11-04', person: '3', chore: 'Unlabelled', up_for_grabs: false, times: 1, stars: 1 },
+      { date: '2026-11-04', person: '9', chore: 'Mystery', up_for_grabs: false, times: 1, stars: 1 },
+      { date: '2026-11-04', person: 'Unknown', chore: 'Nobody', up_for_grabs: false, times: 1, stars: 1 },
+    ]);
+    expect(out.totals).toEqual([
+      { person: '3', times: 1, stars: 1 },
+      { person: '9', times: 1, stars: 1 },
+      { person: 'Dawn', times: 2, stars: 4 },
+      { person: 'Jake', times: 2, stars: 3 },
+      { person: 'Unknown', times: 1, stars: 1 },
+    ]);
+    expect(out.open).toEqual([]);
+  });
+
+  it('chore_star_summary groups open chores by chore + owner with the earliest due date', async () => {
+    const { tools } = summary([{ data: [
+      chore('20', { summary: 'Floss', status: 'pending', start: '2026-11-05', reward_points: 2 }, { category: rel('1') }),
+      chore('20', { summary: 'Floss', status: 'pending', start: '2026-11-03', reward_points: 2 }, { category: rel('1') }),
+      chore('20', { summary: 'Floss', status: 'pending', start: '2026-11-04', reward_points: 2 }, { category: rel('1') }),
+      chore('21', { summary: 'Fridge', status: 'pending', start: null, up_for_grabs: true, reward_points: 5 }),
+      chore('21', { summary: 'Fridge', status: 'pending', start: '', up_for_grabs: true, reward_points: 5, completed_at: 'x' }),
+      chore('22', { summary: 'Passport', status: 'pending', start: null, reward_points: 10 }, { category: rel('2') }),
+      chore('22', { summary: 'Passport', status: 'pending', start: '2026-11-06', reward_points: 10, completed_at: 'y' }, { category: rel('2') }),
+      chore('23', { summary: 'Loose', status: 'pending' }),
+    ] }]);
+    const out = JSON.parse((await tools.skylight_chore_star_summary({ after: '2026-11-01', before: '2026-11-07' })).content[0].text);
+    expect(out.open).toEqual([
+      { chore: 'Floss', owner: 'Dawn', stars: 2, earliest_due: '2026-11-03', pending: 3 },
+      { chore: 'Fridge', owner: 'Up for Grabs', stars: 5, earliest_due: null, pending: 2 },
+      { chore: 'Loose', owner: 'Unassigned', stars: 0, earliest_due: null, pending: 1 },
+      { chore: 'Passport', owner: 'Jake', stars: 10, earliest_due: '2026-11-06', pending: 2 },
+    ]);
+    expect(out.completed).toEqual([]);
+    expect(out.totals).toEqual([]);
+  });
+
+  it('chore_star_summary drops a chore repeated across overlapping windows', async () => {
+    const dup = chore('30', { summary: 'Late one', status: 'complete', completed_on: '2026-11-09', reward_points: 4, start: '2026-11-05' }, { category: rel('1') });
+    const { tools } = summary([{ data: [dup] }, { data: [dup] }]);
+    const out = JSON.parse((await tools.skylight_chore_star_summary({ after: '2026-11-01', before: '2026-11-10' })).content[0].text);
+    expect(out.completed).toEqual([{ date: '2026-11-09', person: 'Dawn', chore: 'Late one', up_for_grabs: false, times: 1, stars: 4 }]);
+  });
+
+  it('chore_star_summary treats an empty body as no chores and missing categories as no labels', async () => {
+    const { tools } = summary([undefined], null);
+    const out = JSON.parse((await tools.skylight_chore_star_summary({ after: '2026-11-01', before: '2026-11-01' })).content[0].text);
+    expect(out).toMatchObject({ totals: [], completed: [], open: [] });
+  });
+
+  it('chore_star_summary refuses an envelope it does not recognise', async () => {
+    const { tools } = summary([{ data: { id: '1' } }]);
+    await expect(tools.skylight_chore_star_summary({ after: '2026-11-01', before: '2026-11-01' })).rejects.toThrow(/unrecognised shape/);
+  });
+
+  it('chore_star_summary refuses bad, reversed or over-long ranges without calling the API', async () => {
+    const { tools, request } = summary([]);
+    await expect(tools.skylight_chore_star_summary({ after: '11/01/2026', before: '2026-11-07' })).rejects.toThrow(/after must be a real date/);
+    await expect(tools.skylight_chore_star_summary({ after: '2026-02-30', before: '2026-03-07' })).rejects.toThrow(/after must be a real date/);
+    await expect(tools.skylight_chore_star_summary({ after: '2026-11-01', before: '2026-13-01' })).rejects.toThrow(/before must be a real date/);
+    await expect(tools.skylight_chore_star_summary({ after: '2026-11-07', before: '2026-11-01' })).rejects.toThrow(/on or after/);
+    await expect(tools.skylight_chore_star_summary({ after: '2026-01-01', before: '2026-05-01' })).rejects.toThrow(/at most 120 days/);
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('chore_star_summary allows exactly 120 days', async () => {
+    const { tools } = summary(Array.from({ length: 18 }, () => ({ data: [] })));
+    await expect(tools.skylight_chore_star_summary({ after: '2026-01-01', before: '2026-04-30' })).resolves.toBeDefined();
   });
 
   // ── skylight_create_chore ────────────────────────────────────────────────
