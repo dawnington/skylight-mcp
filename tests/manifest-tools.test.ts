@@ -74,6 +74,6 @@ describe('manifest.json tools', () => {
   });
 
   it('covers the whole surface (guards against a registrar being dropped here)', () => {
-    expect(registeredTools()).toHaveLength(116);
+    expect(registeredTools()).toHaveLength(117);
   });
 });

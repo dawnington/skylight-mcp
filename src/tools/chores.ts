@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { UNTRUSTED_CONTENT_RULE } from '@chrischall/mcp-utils';
 import type { McpServer, ServerContext } from '@modelcontextprotocol/server';
 import { apiPath, textContent, flattenJsonApi, pruneUndefined, frameScoped, idParam, idArrayParam, type GetClient, type JsonApiDoc, type RelatedResource, type RelatedDoc, flattenRewards, inlineRelationshipId } from './_shared.js';
 import { affectsMultipleOccurrences, confirmTokenParam, confirmWrite, framePath } from './_confirm.js';
@@ -47,6 +48,27 @@ function choreLine(ch: Record<string, unknown>): string {
   return briefLine(ch.summary, at, typeof ch.status === 'string' && ch.status ? ch.status : 'no status');
 }
 
+
+const DAY_MS = 86_400_000;
+/** Longest range skylight_chore_star_summary reads: at most 18 week-long requests. */
+const SUMMARY_MAX_DAYS = 120;
+
+/** Parse a strict, real YYYY-MM-DD (2026-02-30 is refused, not rolled over) to UTC ms. */
+function parseDay(value: string, field: string): number {
+  const t = Date.parse(`${value}T00:00:00Z`);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(t) || isoDay(t) !== value) {
+    throw new Error(`${field} must be a real date as YYYY-MM-DD.`);
+  }
+  return t;
+}
+
+function isoDay(t: number): string {
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+interface CompletedRow { date: string; person: string; chore: string; up_for_grabs: boolean; times: number; stars: number }
+interface OpenRow { chore: string; owner: string; stars: number; earliest_due: string | null; pending: number }
+
 export function registerChoreTools(server: McpServer, getClient: GetClient) {
   server.registerTool(
     'skylight_list_chores',
@@ -55,6 +77,8 @@ export function registerChoreTools(server: McpServer, getClient: GetClient) {
       inputSchema: z.object({
         after: z.string().describe('YYYY-MM-DD inclusive lower bound (required by the API).'),
         before: z.string().describe('YYYY-MM-DD inclusive upper bound (required by the API).'),
+        include_up_for_grabs: z.boolean().optional().describe('Include unassigned up-for-grabs chores. Defaults to true: without it Skylight leaves them out.'),
+        include_late: z.boolean().optional().describe('Also return overdue chores from before `after` that are still open.'),
         frameId: z.string().optional(),
         view: viewParam.describe('"full" (default) returns the flattened chores; "brief" returns one line per chore — title — <date[Ttime], or "no date"> — <status> — inside the untrusted-data envelope, "-- none" when the range is empty.'),
       }),
@@ -65,8 +89,10 @@ export function registerChoreTools(server: McpServer, getClient: GetClient) {
         aliases: ['chores', 'chore chart', 'routines', 'kids chores', 'to do', 'skylight'],
       }),
     },
-    frameScoped(getClient, async (c, f, { after, before, view }: { after: string; before: string; frameId?: string; view?: 'full' | 'brief' }) => {
-      const doc = await c.request<RelatedDoc | undefined>('GET', apiPath`/frames/${f}/chores`, { query: { after, before } });
+    frameScoped(getClient, async (c, f, { after, before, include_up_for_grabs, include_late, view }: { after: string; before: string; include_up_for_grabs?: boolean; include_late?: boolean; frameId?: string; view?: 'full' | 'brief' }) => {
+      const query: Record<string, string> = { after, before, include_up_for_grabs: String(include_up_for_grabs ?? true) };
+      if (include_late !== undefined) query.include_late = String(include_late);
+      const doc = await c.request<RelatedDoc | undefined>('GET', apiPath`/frames/${f}/chores`, { query });
       if (view === 'brief') {
         const who = 'Chore titles are written by members of the Skylight frame.';
         const rows = doc ? doc.data : [];
@@ -77,6 +103,97 @@ export function registerChoreTools(server: McpServer, getClient: GetClient) {
         return briefResponse(rows.map((r) => choreLine(flattenChore(r))), who);
       }
       return doc ? textContent(flattenChores(doc)) : textContent([]);
+    }),
+  );
+
+  // Read-only roll-up for star tracking: reads the range in week-long requests
+  // (with up-for-grabs and late chores, which the plain read omits), drops the
+  // duplicates overlapping reads return (the key needs more than the id: a
+  // recurring chore's occurrences share it), and aggregates so a month of
+  // chores comes back as a few hundred short rows instead of thousands of
+  // full records.
+  server.registerTool(
+    'skylight_chore_star_summary',
+    {
+      description: 'Summarise chore completions and stars over a date range (at most 120 days). Returns `totals` (completions and stars per person), `completed` (one row per date + person + chore + up-for-grabs flag, with `times` and `stars`; the person is whoever completed it, so up-for-grabs completions are credited correctly), and `open` (pending chores grouped by chore + owner — a family member or "Up for Grabs" — with stars, `earliest_due` (null = anytime) and the number of `pending` occurrences). Includes up-for-grabs and overdue chores. Skipped occurrences are neither completed nor open. People are named by their Skylight category label.',
+      inputSchema: z.object({
+        after: z.string().describe('YYYY-MM-DD first day, inclusive.'),
+        before: z.string().describe('YYYY-MM-DD last day, inclusive.'),
+        frameId: z.string().optional(),
+      }),
+      annotations: { readOnlyHint: true, openWorldHint: true },
+      _meta: familyMeta('lookup', { when: { start: 'after', end: 'before' }, aliases: ['stars', 'chore stars', 'star totals', 'chore completions'] }),
+    },
+    frameScoped(getClient, async (c, f, { after, before }: { after: string; before: string; frameId?: string }) => {
+      const from = parseDay(after, 'after');
+      const to = parseDay(before, 'before');
+      if (to < from) throw new Error('`before` must be on or after `after`.');
+      if ((to - from) / DAY_MS + 1 > SUMMARY_MAX_DAYS) throw new Error(`Summarise at most ${SUMMARY_MAX_DAYS} days per call; split the range.`);
+
+      const cats = await c.request<RelatedDoc | undefined>('GET', apiPath`/frames/${f}/categories`);
+      const labels = new Map<string, string>();
+      const catRows = cats?.data;
+      for (const r of Array.isArray(catRows) ? catRows : []) labels.set(String(r.id), String(r.attributes?.label ?? r.id));
+      const person = (id: unknown, fallback: string) => (typeof id === 'string' ? labels.get(id) ?? id : fallback);
+
+      const seen = new Set<string>();
+      const chores: Record<string, unknown>[] = [];
+      for (let start = from; start <= to; start += 7 * DAY_MS) {
+        const query = { after: isoDay(start), before: isoDay(Math.min(start + 6 * DAY_MS, to)), include_late: 'true', include_up_for_grabs: 'true' };
+        const doc = await c.request<RelatedDoc | undefined>('GET', apiPath`/frames/${f}/chores`, { query });
+        const rows = doc ? doc.data : [];
+        if (!Array.isArray(rows)) throw new Error('Skylight answered a chores read in an unrecognised shape.');
+        for (const r of rows) {
+          const ch = flattenChore(r);
+          const key = JSON.stringify([ch.id, ch.start, ch.completed_at, ch.completed_on, ch.summary]);
+          if (seen.has(key)) continue;
+          seen.add(key);
+          chores.push(ch);
+        }
+      }
+
+      const completed = new Map<string, CompletedRow>();
+      const open = new Map<string, OpenRow>();
+      for (const ch of chores) {
+        const chore = String(ch.summary);
+        const stars = typeof ch.reward_points === 'number' ? ch.reward_points : 0;
+        const upForGrabs = ch.up_for_grabs === true;
+        if (ch.status === 'complete') {
+          const date = ch.completed_on;
+          if (typeof date !== 'string' || date < after || date > before) continue;
+          const who = person(ch.completed_category_id ?? ch.category_id, 'Unknown');
+          const key = JSON.stringify([date, who, chore, upForGrabs]);
+          const row = completed.get(key) ?? { date, person: who, chore, up_for_grabs: upForGrabs, times: 0, stars: 0 };
+          row.times += 1;
+          row.stars += stars;
+          completed.set(key, row);
+        } else if (ch.status === 'pending') {
+          const owner = upForGrabs ? 'Up for Grabs' : person(ch.category_id, 'Unassigned');
+          const due = typeof ch.start === 'string' && ch.start ? ch.start : null;
+          const key = JSON.stringify([chore, owner]);
+          const row = open.get(key) ?? { chore, owner, stars, earliest_due: due, pending: 0 };
+          if (due !== null && (row.earliest_due === null || due < row.earliest_due)) row.earliest_due = due;
+          row.pending += 1;
+          open.set(key, row);
+        }
+      }
+
+      const totals = new Map<string, { person: string; times: number; stars: number }>();
+      for (const row of completed.values()) {
+        const t = totals.get(row.person) ?? { person: row.person, times: 0, stars: 0 };
+        t.times += row.times;
+        t.stars += row.stars;
+        totals.set(row.person, t);
+      }
+      const sorted = <T>(m: Map<string, T>) => [...m.keys()].sort().map((k) => m.get(k) as T);
+      return textContent({
+        untrusted_content: true,
+        note: `Chore titles are written by members of the Skylight frame. ${UNTRUSTED_CONTENT_RULE}`,
+        range: { after, before },
+        totals: sorted(totals),
+        completed: sorted(completed),
+        open: sorted(open),
+      });
     }),
   );
 
