@@ -303,6 +303,10 @@
       "description": "List chores for a Skylight frame within a required date range. Each chore carries its assignee in `category_id` (a family-member category — resolve names via skylight_list_categories) and, for a completed up-for-grabs chore, who did it in `completed_category_id`. Either key is pluralised — `category_ids` / `completed_category_ids` — when the API links several members, so an absent singular key means unassigned, never multi-assigned."
     },
     {
+      "name": "skylight_chore_star_summary",
+      "description": "Summarise chore completions and stars over a date range (at most 120 days). Returns `totals` (completions and stars per person), `completed` (one row per date + person + chore + up-for-grabs flag, with `times` and `stars`; the person is whoever completed it, so up-for-grabs completions are credited correctly), and `open` (pending chores grouped by chore + owner — a family member or \"Up for Grabs\" — with stars, `earliest_due` (null = anytime) and the number of `pending` occurrences). Includes up-for-grabs and overdue chores. Skipped occurrences are neither completed nor open. People are named by their Skylight category label."
+    },
+    {
       "name": "skylight_create_chore",
       "description": "Create a one-time chore on a Skylight frame, either assigned to one family member (`category_id`) or unassigned so anyone can claim it (`up_for_grabs: true`). Pass exactly one of the two. For a repeating up-for-grabs chore use skylight_create_recurring_chore."
     },

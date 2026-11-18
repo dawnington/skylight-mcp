@@ -65,7 +65,7 @@ describe('every tool declares whether it is a read', () => {
   it('registers the full surface (guards against a registrar being dropped here)', () => {
     // A meta-test that silently stops covering half the tools is worse than no
     // meta-test, so the count is asserted before the property is.
-    expect(Object.keys(registeredAnnotations())).toHaveLength(115);
+    expect(Object.keys(registeredAnnotations())).toHaveLength(116);
   });
 
   it('sets an explicit boolean readOnlyHint on all of them', () => {

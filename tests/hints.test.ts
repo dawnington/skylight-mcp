@@ -68,7 +68,7 @@ const tool = (tools: Listed[], name: string) => {
 describe('_meta.mint hints on the served tool list', () => {
   it('every tool except the healthcheck carries domain "family" and a valid intent, in the contract shape', async () => {
     const tools = await served();
-    expect(tools.length).toBe(116);
+    expect(tools.length).toBe(117);
     for (const t of tools) {
       if (t.name === 'skylight_healthcheck') continue; // registered by mcp-utils, which takes no _meta
       const m = t._meta?.mint;

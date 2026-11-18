@@ -4,7 +4,7 @@
 [![npm](https://img.shields.io/npm/v/skylight-mcp)](https://www.npmjs.com/package/skylight-mcp)
 [![license](https://img.shields.io/npm/l/skylight-mcp)](LICENSE)
 
-MCP server for [Skylight Calendar](https://www.ourskylight.com) — 116 tools across calendar events (read+write), shared lists (read+write), chores and rewards (read+write), task-box items (read+write), meals (read+write), AI auto-creation (meal-plan + activity-idea generators with draft review/approve), messages and albums (read+write), photo/video upload, and frame/device/account settings + calendar + member management (read+write, incl. preset and custom-photo avatars).
+MCP server for [Skylight Calendar](https://www.ourskylight.com) — 117 tools across calendar events (read+write), shared lists (read+write), chores and rewards (read+write), task-box items (read+write), meals (read+write), AI auto-creation (meal-plan + activity-idea generators with draft review/approve), messages and albums (read+write), photo/video upload, and frame/device/account settings + calendar + member management (read+write, incl. preset and custom-photo avatars).
 
 Every API request carries the `skylight-api-version: 2026-05-01` header (matching the official mobile app); without it some features 422 with "API version does not support …".
 
@@ -115,6 +115,7 @@ All data in Skylight is scoped to a *frame* (the family hub device). On first us
 | lists | `skylight_clear_list` | W | Remove all items from a list (single bulk delete; confirm-gated, the preview lists the items) |
 | lists | `skylight_set_list_item_section` | W | Move list items into a named section (or clear it) |
 | chores | `skylight_list_chores` | R | List chores within a date range |
+| chores | `skylight_chore_star_summary` | R | Completions and stars per person/day/chore, plus open chores, over a date range |
 | chores | `skylight_search_chores` | R | Search chores (incl. unscheduled/template chores) |
 | chores | `skylight_create_chore` | W | Create a new chore (summary + category) |
 | chores | `skylight_create_recurring_chore` | W | Create a recurring chore or routine (RRULE) |
